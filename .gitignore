@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend/.venv/
+*.db
+backend/heavywatch.db
+backend/uploads/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+
+# Env / secrets
+.env
+backend/.env
+frontend/.env.local
+
+# OS / editor
+.DS_Store
+*.log

@@ -1,0 +1,33 @@
+# Fly.io config. Deploy:
+#   fly launch --no-deploy        # create the app (keep this fly.toml)
+#   fly volumes create hwl_data --size 1
+#   fly postgres create && fly postgres attach <db>   # sets DATABASE_URL
+#   fly secrets set HWL_DATABASE_URL="$(fly postgres ... connection string)"
+#   fly deploy
+app = "heavy-watch-lax"
+primary_region = "lax"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+  HWL_UPLOADS_DIR = "/data/uploads"
+  HWL_USER_AGENT = "HeavyWatchLAX/1.0 (fly)"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false   # keep the poll loop + WebSocket alive
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.checks]
+    [[http_service.checks.http]]
+      path = "/api/health"
+      interval = "30s"
+      timeout = "5s"
+
+[[mounts]]
+  source = "hwl_data"
+  destination = "/data"

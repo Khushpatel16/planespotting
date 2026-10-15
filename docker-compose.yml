@@ -1,0 +1,33 @@
+# Prod-like local stack: the single-service app + managed-style Postgres.
+# Usage: docker compose up --build   ->  http://localhost:8000
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      HWL_DATABASE_URL: postgresql+asyncpg://hwl:hwl@db:5432/heavywatch
+      HWL_UPLOADS_DIR: /data/uploads
+    volumes:
+      - uploads:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hwl
+      POSTGRES_PASSWORD: hwl
+      POSTGRES_DB: heavywatch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hwl"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  uploads:
+  pgdata:
