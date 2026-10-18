@@ -11,6 +11,12 @@ greenlet==3.1.1
 # Optional Postgres driver (used automatically when DATABASE_URL is postgres://...)
 asyncpg==0.30.0
 
+# Live ATC captions: Whisper (CTranslate2) + PyAV to decode the MP3 stream.
+# Optional - if missing, the ATC tab still plays audio and reports captions as unavailable.
+faster-whisper>=1.1.1
+av>=13.0
+numpy>=1.26
+
 # Dev / test
 pytest==8.3.4
 pytest-asyncio==0.25.0

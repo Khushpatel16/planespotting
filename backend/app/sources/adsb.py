@@ -1,8 +1,9 @@
 """ADS-B ingestion with polite polling, multi-source fallback, and caching.
 
-Primary source is adsb.lol (ODbL); fallbacks are the ADSBExchange-compatible
-airplanes.live and, as a last resort, OpenSky. All three are normalized to RawAircraft.
-On total failure we serve the last good snapshot marked stale so the UI never goes dark.
+Primary source is adsb.lol (ODbL); fallbacks are the ADSBExchange-compatible adsb.fi
+open-data API and airplanes.live (which now needs prior approval), and, as a last resort,
+OpenSky. All are normalized to RawAircraft. On total failure we serve the last good
+snapshot marked stale so the UI never goes dark.
 """
 
 from __future__ import annotations
@@ -67,6 +68,8 @@ def _normalize_adsbexchange(raw: dict, source: str) -> RawAircraft | None:
         on_ground=on_ground,
         seen_seconds=_to_float(raw.get("seen")),
         source=source,
+        desc=(raw.get("desc") or None),
+        own_op=(raw.get("ownOp") or None),
     )
 
 
@@ -99,13 +102,21 @@ def _normalize_opensky_state(s: list, source: str) -> RawAircraft | None:
 
 
 class AdsbClient:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        sources: list[str] | None = None,
+    ):
         self.settings = settings
         self._client = client or httpx.AsyncClient(
             timeout=settings.http_timeout_seconds,
             headers={"User-Agent": settings.user_agent},
         )
         self._owns_client = client is None
+        # Source order is overridable so the wide sweep can prefer a different provider
+        # (and keep its own cooldown bookkeeping) without touching the LAX poller's chain.
+        self._sources = sources
         self._last_good: list[RawAircraft] = []
         self._last_good_at: float = 0.0
         # naive per-source cooldown after a rate-limit / error
@@ -121,18 +132,53 @@ class AdsbClient:
     def _cooldown(self, name: str, seconds: float) -> None:
         self._cooldown_until[name] = time.monotonic() + seconds
 
+    def all_cooling_down(self) -> float:
+        """Seconds until at least one configured source is usable again (0 = now)."""
+        now = time.monotonic()
+        remaining = [self._cooldown_until.get(n, 0.0) - now for n in self.sources]
+        if not remaining or min(remaining) <= 0:
+            return 0.0
+        return min(remaining)
+
+    def _check(self, name: str, r: httpx.Response) -> None:
+        """Translate rate-limit / access-denied responses into cooldowns + clear errors."""
+        if r.status_code == 429:
+            retry_after = _to_float(r.headers.get("retry-after"))
+            secs = retry_after if retry_after else self.settings.adsb_ratelimit_cooldown_seconds
+            self._cooldown(name, min(max(secs, 5.0), 300.0))
+            raise RuntimeError(f"{name} rate-limited (429)")
+        if r.status_code in (401, 403):
+            # The source is refusing us outright (e.g. airplanes.live now requires prior
+            # approval). Back off for a long while instead of retrying every tick.
+            self._cooldown(name, self.settings.adsb_forbidden_cooldown_seconds)
+            raise RuntimeError(f"{name} access denied ({r.status_code}) - see source's access policy")
+        r.raise_for_status()
+
+    @staticmethod
+    def _aircraft_list(data: dict) -> list:
+        # ADSBExchange-style feeds use "ac"; adsb.fi's open-data API uses "aircraft".
+        return data.get("ac") or data.get("aircraft") or []
+
     async def _fetch_adsblol(self, lat: float, lon: float, dist: float) -> list[RawAircraft]:
         url = f"{self.settings.adsblol_base}/lat/{lat}/lon/{lon}/dist/{int(dist)}"
         r = await self._client.get(url)
-        if r.status_code == 429:
-            self._cooldown("adsblol", 30)
-            raise RuntimeError("adsblol rate-limited (429)")
-        r.raise_for_status()
-        data = r.json()
+        self._check("adsblol", r)
         return [
             ac
-            for raw in (data.get("ac") or [])
+            for raw in self._aircraft_list(r.json())
             if (ac := _normalize_adsbexchange(raw, "adsblol")) is not None
+        ]
+
+    async def _fetch_adsbfi(self, lat: float, lon: float, dist: float) -> list[RawAircraft]:
+        # adsb.fi open data: same schema as adsb.lol; radius capped at 250 nm; ~1 req/s.
+        radius = min(int(dist), 250)
+        url = f"{self.settings.adsbfi_base}/lat/{lat}/lon/{lon}/dist/{radius}"
+        r = await self._client.get(url)
+        self._check("adsbfi", r)
+        return [
+            ac
+            for raw in self._aircraft_list(r.json())
+            if (ac := _normalize_adsbexchange(raw, "adsbfi")) is not None
         ]
 
     async def _fetch_airplaneslive(self, lat: float, lon: float, dist: float) -> list[RawAircraft]:
@@ -140,14 +186,10 @@ class AdsbClient:
         radius = min(int(dist), 250)
         url = f"{self.settings.airplaneslive_base}/point/{lat}/{lon}/{radius}"
         r = await self._client.get(url)
-        if r.status_code == 429:
-            self._cooldown("airplaneslive", 30)
-            raise RuntimeError("airplaneslive rate-limited (429)")
-        r.raise_for_status()
-        data = r.json()
+        self._check("airplaneslive", r)
         return [
             ac
-            for raw in (data.get("ac") or [])
+            for raw in self._aircraft_list(r.json())
             if (ac := _normalize_adsbexchange(raw, "airplaneslive")) is not None
         ]
 
@@ -163,10 +205,7 @@ class AdsbClient:
         if self.settings.opensky_username:
             auth = (self.settings.opensky_username, self.settings.opensky_password)
         r = await self._client.get(f"{self.settings.opensky_base}/states/all", params=params, auth=auth)
-        if r.status_code == 429:
-            self._cooldown("opensky", 60)
-            raise RuntimeError("opensky rate-limited (429)")
-        r.raise_for_status()
+        self._check("opensky", r)
         data = r.json()
         return [
             ac
@@ -174,17 +213,26 @@ class AdsbClient:
             if (ac := _normalize_opensky_state(s, "opensky")) is not None
         ]
 
+    @property
+    def sources(self) -> list[str]:
+        return self._sources if self._sources is not None else self.settings.adsb_source_list
+
     async def fetch(
-        self, lat: float, lon: float, dist_nm: float
+        self, lat: float, lon: float, dist_nm: float, use_cache: bool = True
     ) -> tuple[list[RawAircraft], dict[str, str]]:
-        """Try each configured source in order. Returns (aircraft, status-per-source)."""
+        """Try each configured source in order. Returns (aircraft, status-per-source).
+
+        use_cache=False skips the last-good fallback (for callers that query many
+        different areas, where "the previous answer" would be the wrong place).
+        """
         fetchers = {
             "adsblol": self._fetch_adsblol,
+            "adsbfi": self._fetch_adsbfi,
             "airplaneslive": self._fetch_airplaneslive,
             "opensky": self._fetch_opensky,
         }
         status: dict[str, str] = {}
-        for name in self.settings.adsb_source_list:
+        for name in self.sources:
             fn = fetchers.get(name)
             if fn is None:
                 status[name] = "unknown source"
@@ -195,15 +243,16 @@ class AdsbClient:
             try:
                 aircraft = await fn(lat, lon, dist_nm)
                 status[name] = f"ok ({len(aircraft)})"
-                self._last_good = aircraft
-                self._last_good_at = time.time()
+                if use_cache:
+                    self._last_good = aircraft
+                    self._last_good_at = time.time()
                 return aircraft, status
             except Exception as e:  # noqa: BLE001 - we want to fall through to the next source
                 log.warning("ADS-B source %s failed: %s", name, e)
                 status[name] = f"error: {type(e).__name__}"
 
         # All sources failed -> serve last good (if any), flagged stale.
-        if self._last_good:
+        if use_cache and self._last_good:
             age = time.time() - self._last_good_at
             status["cache"] = f"stale ({age:.0f}s)"
             return self._last_good, status

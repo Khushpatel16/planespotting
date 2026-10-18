@@ -8,6 +8,7 @@ interface Props {
   onClose: () => void;
   onLog: (ac: Aircraft) => void;
   onWatch?: (ac: Aircraft) => void;
+  onCockpit?: (ac: Aircraft) => void;
 }
 
 // Session-level cache so re-selecting an aircraft doesn't refetch its photo.
@@ -47,7 +48,7 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-export default function DetailPanel({ ac, onClose, onLog, onWatch }: Props) {
+export default function DetailPanel({ ac, onClose, onLog, onWatch, onCockpit }: Props) {
   const role = roleBadge(ac.role);
   const photo = usePhoto(ac.hex, ac.registration);
   return (
@@ -92,8 +93,34 @@ export default function DetailPanel({ ac, onClose, onLog, onWatch }: Props) {
       {(ac.origin || ac.destination) && (
         <Row label="Route" value={`${ac.origin || "?"} → ${ac.destination || "?"}`} />
       )}
-      <Row label="Source" value={ac.source} />
+      {(ac.country || ac.state) && (
+        <Row
+          label="Over"
+          value={[ac.state, ac.country === "USA" ? "USA" : ac.country === "CAN" ? "Canada" : ac.country === "MEX" ? "Mexico" : null]
+            .filter(Boolean)
+            .join(", ")}
+        />
+      )}
+      {ac.desc && <Row label="Airframe" value={ac.desc} />}
+      {(ac.categories ?? []).filter((c) => c !== "all").length > 0 && (
+        <Row
+          label="Class"
+          value={(ac.categories ?? [])
+            .filter((c) => c !== "all")
+            .map((c) => c.replace(/_/g, " ").toUpperCase())
+            .join(" · ")}
+        />
+      )}
+      <Row
+        label="Source"
+        value={`${ac.source}${ac.seen_seconds != null && ac.seen_seconds > 60 ? ` · fix ${Math.round(ac.seen_seconds)} s old` : ""}`}
+      />
 
+      {onCockpit && ac.lat != null && (
+        <button className="btn-secondary" onClick={() => onCockpit(ac)}>
+          Cockpit view
+        </button>
+      )}
       <button className="btn-primary log-btn" onClick={() => onLog(ac)}>
         + Log this sighting
       </button>

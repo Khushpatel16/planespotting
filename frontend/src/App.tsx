@@ -5,6 +5,9 @@ import { CAT } from "./lib/colors";
 import { useSnapshot } from "./hooks/useSnapshot";
 import { useNotifications } from "./hooks/useNotifications";
 import { useWatchlist } from "./hooks/useWatchlist";
+import { useWide } from "./hooks/useWide";
+import { useAtcAudio } from "./hooks/useAtcAudio";
+import { useAtcTranscript } from "./hooks/useAtcTranscript";
 import { getBasemap, loadBasemapId, saveBasemapId } from "./lib/basemaps";
 import { unlockAudio } from "./lib/chime";
 import StatusBar from "./components/StatusBar";
@@ -19,16 +22,36 @@ import DetailPanel from "./components/DetailPanel";
 import Logbook, { type Prefill } from "./components/Logbook";
 import StatsDashboard from "./components/StatsDashboard";
 import SkyView from "./components/SkyView";
+import AtcPanel from "./components/AtcPanel";
 
 const DEFAULT_FILTERS: Filters = {
   showTargets: true,
   showOtherHeavies: true,
   showAllTraffic: false,
+  showWide: true,
+  country: "any",
+  state: "",
+  traffic: "all",
   alertRadiusNm: 60,
   alertOn747: true,
   alertOnA380: true,
   alertOnHeavies: false,
 };
+
+/** Tier toggles (747/A380 · other heavies · everything else). */
+function passesTiers(a: Aircraft, f: Filters): boolean {
+  if (a.type.is_target) return f.showTargets;
+  if (a.type.is_heavy) return f.showOtherHeavies;
+  return f.showAllTraffic;
+}
+
+/** Country / US-state / traffic-class filters. A chosen traffic class overrides the tiers. */
+function passesFilters(a: Aircraft, f: Filters): boolean {
+  if (f.country !== "any" && a.country !== f.country) return false;
+  if (f.state && a.state !== f.state) return false;
+  if (f.traffic !== "all") return (a.categories ?? []).includes(f.traffic);
+  return passesTiers(a, f);
+}
 
 function loadFilters(): Filters {
   try {
@@ -50,17 +73,27 @@ function loadRules(): WatchRule[] {
   return [];
 }
 
-type Tab = "live" | "logbook" | "stats";
+type Tab = "live" | "atc" | "logbook" | "stats";
 
 export default function App() {
   const { snapshot, conn } = useSnapshot();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [filters, setFilters] = useState<Filters>(loadFilters);
+  const { wide, wideState } = useWide(filters.showWide, {
+    country: filters.country,
+    state: filters.state,
+    traffic: filters.traffic,
+  });
+  const atc = useAtcAudio();
+  // Captions follow whatever is playing; the hook lives here so lines keep collecting on other tabs.
+  const playingMounts = useMemo(() => atc.players.map((p) => p.mount), [atc.players]);
+  const captions = useAtcTranscript(playingMounts);
   const [selectedHex, setSelectedHex] = useState<string | null>(null);
   const [override, setOverride] = useState<"west" | "east" | null>(null);
   const [tab, setTab] = useState<Tab>("live");
   const [focus, setFocus] = useState<{ lat: number; lon: number; zoom?: number } | null>(null);
   const [skyOpen, setSkyOpen] = useState(false);
+  const [cockpitRequest, setCockpitRequest] = useState<string | null>(null);
 
   const [notifEnabled, setNotifEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(
@@ -147,24 +180,49 @@ export default function App() {
     soundEnabled,
   );
 
+  // LAX-radius traffic (live, 7 s) after the user's filters.
   const displayed: Aircraft[] = useMemo(() => {
     if (!snapshot) return [];
-    return snapshot.aircraft.filter((a) => {
-      if (a.type.is_target) return filters.showTargets;
-      if (a.type.is_heavy) return filters.showOtherHeavies;
-      return filters.showAllTraffic;
-    });
+    return snapshot.aircraft.filter((a) => passesFilters(a, filters));
   }, [snapshot, filters]);
 
+  // North-America layer: already filtered by country/state/traffic on the server; apply the
+  // tier toggles here and drop anything the live LAX snapshot also carries (it is fresher).
+  const wideDisplayed: Aircraft[] = useMemo(() => {
+    if (!wide || !filters.showWide) return [];
+    const localHexes = new Set((snapshot?.aircraft ?? []).map((a) => a.hex));
+    return wide.aircraft.filter(
+      (a) => !localHexes.has(a.hex) && (filters.traffic !== "all" || passesTiers(a, filters)),
+    );
+  }, [wide, snapshot, filters]);
+
+  const mapAircraft: Aircraft[] = useMemo(
+    () => (wideDisplayed.length ? [...displayed, ...wideDisplayed] : displayed),
+    [displayed, wideDisplayed],
+  );
+
+  const findAircraft = (hex: string | null): Aircraft | null => {
+    if (!hex) return null;
+    return (
+      snapshot?.aircraft.find((a) => a.hex === hex) ??
+      wide?.aircraft.find((a) => a.hex === hex) ??
+      null
+    );
+  };
   const selected = useMemo(
-    () => snapshot?.aircraft.find((a) => a.hex === selectedHex) ?? null,
-    [snapshot, selectedHex],
+    () => findAircraft(selectedHex),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snapshot, wide, selectedHex],
   );
 
   function selectAndFocus(hex: string) {
     setSelectedHex(hex);
-    const ac = snapshot?.aircraft.find((a) => a.hex === hex);
+    const ac = findAircraft(hex);
     if (ac?.lat != null && ac?.lon != null) setFocus({ lat: ac.lat, lon: ac.lon, zoom: 9.5 });
+  }
+
+  function resetFilters() {
+    setFilters((f) => ({ ...f, country: "any", state: "", traffic: "all" }));
   }
 
   function watchAircraft(ac: Aircraft) {
@@ -210,12 +268,17 @@ export default function App() {
 
   return (
     <div className="app">
-      <StatusBar snapshot={snapshot} conn={conn} />
+      <StatusBar
+        snapshot={snapshot}
+        conn={conn}
+        wideCount={filters.showWide && wide ? (wide.counts.total ?? 0) : null}
+        atcCount={atc.players.length}
+      />
 
       <div className="main">
         <div className="map-wrap">
           <MapView
-            aircraft={displayed}
+            aircraft={mapAircraft}
             config={config}
             flow={flow}
             selectedHex={selectedHex}
@@ -224,6 +287,8 @@ export default function App() {
             watchedHexes={matchedHexes}
             basemapId={basemapId}
             onBasemapChange={setBasemapId}
+            cockpitRequest={cockpitRequest}
+            onCockpitRequestHandled={() => setCockpitRequest(null)}
           />
           <div className="map-legend">
             <span><i className="sw" style={{ background: CAT.a380 }} /> A380</span>
@@ -233,6 +298,7 @@ export default function App() {
             <span><i className="sw ring" style={{ borderColor: "#af52de" }} /> watchlist</span>
             <span><i className="sw" style={{ background: "#30b0c7" }} /> airports</span>
             <span><i className="sw line" style={{ background: CAT.approach }} /> approach</span>
+            {filters.showWide && <span><i className="sw faded" style={{ background: CAT.other }} /> NA sweep (older fix)</span>}
           </div>
           {selected && (
             <DetailPanel
@@ -240,6 +306,7 @@ export default function App() {
               onClose={() => setSelectedHex(null)}
               onLog={onLog}
               onWatch={watchAircraft}
+              onCockpit={(ac) => setCockpitRequest(ac.hex)}
             />
           )}
           <button className="sky-open" onClick={() => setSkyOpen(true)} title="Point your camera at the sky to identify aircraft">
@@ -251,6 +318,9 @@ export default function App() {
           <nav className="tabs">
             <button className={tab === "live" ? "active" : ""} onClick={() => setTab("live")}>
               Live
+            </button>
+            <button className={tab === "atc" ? "active" : ""} onClick={() => setTab("atc")}>
+              ATC{atc.players.length > 0 && <span className="tab-dot" title="audio playing" />}
             </button>
             <button
               className={tab === "logbook" ? "active" : ""}
@@ -304,9 +374,36 @@ export default function App() {
                   selected={selected}
                   onFocusSpot={(lat, lon) => setFocus({ lat, lon, zoom: 12 })}
                 />
-                <FilterBar filters={filters} onChange={setFilters} counts={snapshot?.counts ?? {}} />
+                <FilterBar
+                  filters={filters}
+                  onChange={setFilters}
+                  counts={snapshot?.counts ?? {}}
+                  wide={wide}
+                  wideState={wideState}
+                  config={config}
+                  shown={mapAircraft.length}
+                  onReset={resetFilters}
+                />
                 <AircraftList aircraft={displayed} selectedHex={selectedHex} onSelect={selectAndFocus} />
               </>
+            )}
+
+            {tab === "atc" && (
+              <AtcPanel
+                flow={flow}
+                players={atc.players}
+                onToggle={atc.toggle}
+                onStop={atc.stop}
+                onStopAll={atc.stopAll}
+                onVolume={atc.setVolume}
+                onRetry={atc.retry}
+                captions={{
+                  lines: captions.lines,
+                  feeds: captions.feeds,
+                  available: config?.atc_captions?.available,
+                  onClear: captions.clear,
+                }}
+              />
             )}
 
             {tab === "logbook" && config && (

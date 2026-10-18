@@ -53,8 +53,28 @@ export interface Aircraft {
   inbound_reason: string | null;
   origin: string | null;
   destination: string | null;
+  categories: string[]; // traffic category ids (see AppConfig.traffic_categories)
+  country: "USA" | "CAN" | "MEX" | null;
+  state: string | null; // US postal code when country === "USA"
+  desc: string | null;
   seen_seconds: number | null;
   source: string;
+}
+
+export interface WideSnapshot {
+  type: "wide";
+  generated_at: string;
+  aircraft: Aircraft[];
+  counts: Record<string, number>;
+  coverage: {
+    tiles: number;
+    tile_radius_nm: number;
+    last_sweep_seconds: number | null;
+    tiles_ok: number;
+    tiles_failed: number;
+    sources: Record<string, string>;
+  };
+  stale: boolean;
 }
 
 export interface MetarInfo {
@@ -140,6 +160,38 @@ export interface AppConfig {
     search_radius_nm: number;
     poll_interval_seconds: number;
   };
+  traffic_categories: { id: string; label: string; group: string }[];
+  countries: { code: string; name: string }[];
+  us_states: { code: string; name: string }[];
+  wide: { enabled: boolean; tiles: number; tile_radius_nm: number; refresh_hint_seconds: number };
+  atc_captions?: { available: boolean; model: string; max_sessions: number };
+}
+
+// ---- Live ATC captions (server-side Whisper over /ws/atc/{mount}) ----
+
+export interface CaptionLine {
+  id: number;
+  mount: string;
+  t: number; // epoch seconds, end of the transmission
+  duration: number;
+  text: string;
+  confidence: number; // 0..1
+  low: boolean;
+  latency: number;
+}
+
+export type CaptionStreamState = "connecting" | "listening" | "error" | "stopped";
+export type CaptionEngineState = "idle" | "loading" | "ready" | "error" | "unavailable";
+
+export interface CaptionStatus {
+  type: "atc_status";
+  mount: string;
+  stream: CaptionStreamState;
+  engine: CaptionEngineState;
+  model?: string;
+  detail?: string | null;
+  icy_name?: string | null;
+  backlog?: number;
 }
 
 export interface Sighting {
@@ -188,10 +240,21 @@ export interface WatchRule {
 }
 
 // Client-side filter state.
+export type CountryFilter = "any" | "USA" | "CAN" | "MEX";
+
 export interface Filters {
+  // Tier toggles (apply when traffic === "all").
   showTargets: boolean; // 747 + A380
   showOtherHeavies: boolean;
   showAllTraffic: boolean;
+  // Coverage: overlay the North-America-wide sweep outside the LAX radius.
+  showWide: boolean;
+  // Region: country + US state (state implies USA).
+  country: CountryFilter;
+  state: string; // "" = any
+  // Traffic category id ("all" = tiers decide).
+  traffic: string;
+  // Alerts (LAX inbound targets).
   alertRadiusNm: number;
   alertOn747: boolean;
   alertOnA380: boolean;

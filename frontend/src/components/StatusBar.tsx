@@ -6,9 +6,11 @@ import { CAT } from "../lib/colors";
 interface Props {
   snapshot: Snapshot | null;
   conn: ConnState;
+  wideCount?: number | null; // aircraft in the North-America layer (beyond LAX radius)
+  atcCount?: number; // live ATC feeds currently playing
 }
 
-export default function StatusBar({ snapshot, conn }: Props) {
+export default function StatusBar({ snapshot, conn, wideCount = null, atcCount = 0 }: Props) {
   const stale =
     snapshot && Object.values(snapshot.sources_status).some((s) => s.startsWith("stale"));
   const c = snapshot?.counts ?? {};
@@ -28,9 +30,15 @@ export default function StatusBar({ snapshot, conn }: Props) {
         <Metric label="Heavies" value={c.heavies ?? 0} accent={CAT.heavy} />
         <Metric label="Inbound" value={c.inbound_targets ?? 0} accent={CAT.approach} />
         <Metric label="In range" value={c.total ?? 0} accent="var(--text)" />
+        {wideCount !== null && <Metric label="N. America" value={wideCount} accent="var(--text-2)" />}
       </div>
 
       <div className="conn">
+        {atcCount > 0 && (
+          <span className="atc-onair" title={`${atcCount} live ATC feed${atcCount > 1 ? "s" : ""} playing`}>
+            🎧 {atcCount}
+          </span>
+        )}
         <span className={`conn-dot ${conn}`} />
         <div className="conn-text">
           <span>{conn === "open" ? (stale ? "live (cached)" : "live") : conn}</span>

@@ -15,7 +15,9 @@ from app.domain.approach import assess_inbound
 from app.domain.flow import infer_flow, manual_flow
 from app.domain.geo import haversine_nm, initial_bearing
 from app.domain.operators import decode_operator
+from app.domain.regions import locate
 from app.domain.spotting import recommend_spot
+from app.domain.traffic import classify_traffic
 from app.sources.routes import Route
 from app.models import (
     Aircraft,
@@ -60,7 +62,17 @@ def compute_flow(metar: MetarInfo | None, flow_override: str | None) -> FlowResu
 def enrich(raw: RawAircraft, flow: str, settings: Settings, route: Route | None = None) -> Aircraft:
     tinfo = classify_type(raw.type_code)
     op = decode_operator(raw.callsign)
-    role = resolve_role(tinfo.role, tinfo.is_heavy, op.is_cargo)
+    traffic = classify_traffic(
+        raw.type_code,
+        tinfo.role,
+        operator_is_cargo=op.is_cargo,
+        operator_known=op.name is not None,
+        callsign=raw.callsign,
+        desc=raw.desc,
+    )
+    # Pax/freighter: the type table when unambiguous, else operator + description hints.
+    role = resolve_role(tinfo.role, tinfo.is_heavy, op.is_cargo or traffic.is_cargo)
+    region = locate(raw.lat, raw.lon)
 
     distance = bearing = None
     inbound = assess = None
@@ -118,6 +130,10 @@ def enrich(raw: RawAircraft, flow: str, settings: Settings, route: Route | None 
         inbound_reason=assess.reason if assess else None,
         origin=route.origin if route else None,
         destination=route.destination if route else None,
+        categories=sorted(traffic.categories),
+        country=region.country,
+        state=region.state,
+        desc=raw.desc,
         seen_seconds=raw.seen_seconds,
         source=raw.source,
     )
@@ -152,6 +168,18 @@ def build_alert(ac: Aircraft, flow: str) -> Alert:
         spot_id=spot_id,
         message=message,
     )
+
+
+def traffic_counts(aircraft: list[Aircraft]) -> dict[str, int]:
+    """Per-category ("cat:<id>") and per-country ("country:<code>") tallies for the UI."""
+    counts: dict[str, int] = {}
+    for a in aircraft:
+        for c in a.categories:
+            key = f"cat:{c}"
+            counts[key] = counts.get(key, 0) + 1
+        ckey = f"country:{a.country or 'none'}"
+        counts[ckey] = counts.get(ckey, 0) + 1
+    return counts
 
 
 def build_snapshot(
@@ -192,6 +220,7 @@ def build_snapshot(
         "inbound_targets": len(alerts),
         "b747": sum(1 for a in enriched if a.type.family == "747"),
         "a380": sum(1 for a in enriched if a.type.family == "A380"),
+        **traffic_counts(enriched),
     }
 
     flow_info = FlowInfo(

@@ -26,6 +26,8 @@ class RawAircraft(BaseModel):
     on_ground: bool = False
     seen_seconds: float | None = None  # how stale the position is
     source: str = "unknown"
+    desc: str | None = None  # free-text airframe description from the feed's DB (e.g. "BOEING 747-8F")
+    own_op: str | None = None  # registered owner/operator when the feed knows it
 
 
 class TypeInfo(BaseModel):
@@ -88,8 +90,25 @@ class Aircraft(BaseModel):
     origin: str | None = None
     destination: str | None = None
 
+    # Traffic taxonomy + region, used by the client-side Country / State / Traffic filters.
+    categories: list[str] = Field(default_factory=list)  # ids from domain.traffic.TRAFFIC_CATEGORIES
+    country: str | None = None  # "USA" | "CAN" | "MEX" | None (offshore / elsewhere)
+    state: str | None = None  # US postal code when country == "USA"
+    desc: str | None = None
+
     seen_seconds: float | None = None
     source: str
+
+
+class WideSnapshot(BaseModel):
+    """Continental (North America) traffic picture, refreshed by the slow tile sweep."""
+
+    type: str = "wide"
+    generated_at: datetime
+    aircraft: list[Aircraft]
+    counts: dict[str, int]  # per traffic category + per country
+    coverage: dict[str, object]  # tiles, sweep duration, source status
+    stale: bool = False
 
 
 class MetarInfo(BaseModel):

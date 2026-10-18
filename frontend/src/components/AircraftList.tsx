@@ -28,8 +28,8 @@ export default function AircraftList({ aircraft, selectedHex, onSelect }: Props)
               <span className="ac-cs">{aircraftLabel(a)}</span>
               <span className="ac-type">{a.type.family === "A380" ? "A380" : a.type.friendly_name}</span>
               <span className="ac-op">{a.operator.name || a.operator.code || ""}</span>
-              <span className="ac-num">{fmtAlt(a.altitude_ft)}</span>
-              <span className="ac-num">{fmtDist(a.distance_nm)}</span>
+              <span className="ac-num ac-alt">{fmtAlt(a.altitude_ft)}</span>
+              <span className="ac-num ac-dist">{fmtDist(a.distance_nm)}</span>
               {a.is_inbound && <span className="badge inbound">IN</span>}
             </button>
           ))}

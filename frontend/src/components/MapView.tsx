@@ -2,11 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import maplibregl, { Map as MlMap, Marker, Popup } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Aircraft, AppConfig } from "../types";
-import { categoryColor, aircraftLabel, fmtAlt } from "../lib/format";
+import { categoryColor, aircraftLabel, fmtAlt, fmtSpeed, fmtVrate } from "../lib/format";
 import { CAT } from "../lib/colors";
-import { destinationPoint, haversineNm } from "../lib/geo";
+import { destinationPoint, FT_TO_M, haversineNm } from "../lib/geo";
 import { NEARBY_AIRPORTS, type AirportKind } from "../lib/airports";
 import { BASEMAPS, getBasemap, type Basemap, type BaseTheme } from "../lib/basemaps";
+import { MotionField } from "../lib/motion";
+import { restack3d, setMap3d, tintMap3d } from "../lib/map3d";
+import {
+  applyCockpitCamera,
+  cockpitCandidates,
+  flightPhase,
+  setMapInteractive,
+  type FlightPhase,
+} from "../lib/cockpit";
 
 interface Props {
   aircraft: Aircraft[];
@@ -18,15 +27,32 @@ interface Props {
   watchedHexes?: Set<string>;
   basemapId: string;
   onBasemapChange: (id: string) => void;
+  /** Jump into this aircraft's cockpit (from the detail panel). */
+  cockpitRequest: string | null;
+  onCockpitRequestHandled: () => void;
 }
 
 const KLAX = { lat: 33.9416, lon: -118.4085 };
 
+// Quick view presets (top-right, under the basemap switcher).
+const VIEWS: { id: string; label: string; center: [number, number]; zoom: number }[] = [
+  { id: "lax", label: "LAX", center: [KLAX.lon, KLAX.lat], zoom: 9 },
+  { id: "socal", label: "SoCal", center: [-117.6, 34.0], zoom: 6.4 },
+  { id: "west", label: "West", center: [-115.0, 39.5], zoom: 4.6 },
+  { id: "na", label: "N. America", center: [-98.5, 43.0], zoom: 3.1 },
+];
+
 // Empty base style; the chosen basemap is added as the bottom layer on load. A keyless
 // glyph endpoint is provided so the airport label symbols can render text.
+//
+// Use a SINGLE font in `text-font`: MapLibre joins a font stack into one comma-separated
+// request ("A,B/0-255.pbf"), and public glyph servers answer that with an HTML error page,
+// which MapLibre then fails to parse ("Unimplemented type: 4") and no labels render.
+const GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
+const LABEL_FONT = ["Noto Sans Regular"];
 const STYLE: maplibregl.StyleSpecification = {
   version: 8,
-  glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
+  glyphs: GLYPHS,
   sources: {},
   layers: [],
 };
@@ -72,7 +98,7 @@ function ensureAirportLayers(map: MlMap, radiusNm: number, theme: BaseTheme) {
           "text-allow-overlap": false,
           "text-optional": true,
           "symbol-sort-key": ["get", "rank"],
-          "text-font": ["Open Sans Regular", "Arial Unicode MS Regular"],
+          "text-font": LABEL_FONT,
         },
         paint: {
           "text-color": "#0b6b7a",
@@ -97,10 +123,14 @@ function setAirportTheme(map: MlMap, theme: BaseTheme) {
   );
 }
 
-/** Swap the basemap raster source/layer in place, keeping all overlay layers on top. */
+/** Swap the basemap raster source/layer(s) in place, keeping all overlay layers on top. */
 function applyBasemap(map: MlMap, bm: Basemap) {
-  if (map.getLayer("basemap")) map.removeLayer("basemap");
-  if (map.getSource("basemap")) map.removeSource("basemap");
+  for (const id of ["basemap-labels", "basemap"]) {
+    if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource(id)) map.removeSource(id);
+  }
+  // Keep the basemap beneath everything else (insert before the first overlay if present).
+  const before = map.getLayer("centerline") ? "centerline" : undefined;
   map.addSource("basemap", {
     type: "raster",
     tiles: bm.tiles,
@@ -108,9 +138,17 @@ function applyBasemap(map: MlMap, bm: Basemap) {
     attribution: bm.attribution,
     maxzoom: bm.maxzoom ?? 20,
   });
-  // Keep the basemap beneath everything else (insert before the first overlay if present).
-  const before = map.getLayer("centerline") ? "centerline" : undefined;
   map.addLayer({ id: "basemap", type: "raster", source: "basemap" }, before);
+  // Some providers split place/road labels into a transparent "reference" layer.
+  if (bm.labelTiles) {
+    map.addSource("basemap-labels", {
+      type: "raster",
+      tiles: bm.labelTiles,
+      tileSize: 256,
+      maxzoom: bm.maxzoom ?? 20,
+    });
+    map.addLayer({ id: "basemap-labels", type: "raster", source: "basemap-labels" }, before);
+  }
 
   // Overlay colours that need to flip with the basemap theme.
   if (map.getLayer("runways")) {
@@ -119,6 +157,10 @@ function applyBasemap(map: MlMap, bm: Basemap) {
   setAirportTheme(map, bm.theme);
   const canvas = map.getContainer();
   canvas.classList.toggle("map-dark", bm.theme === "dark");
+  if (map.getTerrain()) {
+    restack3d(map);
+    tintMap3d(map, bm.theme);
+  }
 }
 
 type IconKind = "a380" | "b747" | "heavy" | "other";
@@ -271,10 +313,12 @@ function planeImage(kind: IconKind, color: string, size = 80, pixelRatio = 2) {
 function aircraftFeatures(
   aircraft: Aircraft[],
   watchedHexes?: Set<string>,
+  hideHex?: string | null,
 ): GeoJSON.FeatureCollection {
   const features: GeoJSON.Feature[] = [];
   for (const a of aircraft) {
     if (a.lat === null || a.lon === null) continue;
+    if (hideHex && a.hex === hideHex) continue;
     const icon =
       a.type.family === "A380"
         ? "plane-a380"
@@ -291,21 +335,27 @@ function aircraftFeatures(
           : a.type.is_heavy
             ? 0.74
             : 0.56;
+    // Positions from the slow continental sweep can be a minute or two old: fade them so
+    // the eye reads "approximate" without hiding them.
+    const age = a.seen_seconds ?? 0;
+    const opacity = age > 240 ? 0.4 : age > 90 ? 0.6 : 0.98;
+    const elev = Math.max(0, (a.altitude_ft ?? 0) * FT_TO_M);
     features.push({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [a.lon, a.lat] },
+      geometry: { type: "Point", coordinates: [a.lon, a.lat, elev] },
       properties: {
         hex: a.hex,
         track: a.track_deg ?? 0,
         color: categoryColor(a),
         icon,
         size,
+        opacity,
         isTarget: a.type.is_target,
         isHeavy: a.type.is_heavy,
         inbound: a.is_inbound,
         watched: watchedHexes?.has(a.hex) ?? false,
         label: aircraftLabel(a),
-        sub: `${a.type.friendly_name} · ${fmtAlt(a.altitude_ft)}`,
+        sub: `${a.type.friendly_name} · ${fmtAlt(a.altitude_ft)}${age > 60 ? ` · fix ${Math.round(age)} s old` : ""}`,
       },
     });
   }
@@ -370,6 +420,20 @@ function centerlineFeature(flow: "west" | "east"): GeoJSON.FeatureCollection {
   };
 }
 
+interface Hud {
+  hex: string;
+  label: string;
+  type: string;
+  phase: FlightPhase;
+  alt: string;
+  gs: string;
+  hdg: string;
+  vs: string;
+  rwy: string;
+  idx: number;
+  total: number;
+}
+
 export default function MapView({
   aircraft,
   config,
@@ -380,6 +444,8 @@ export default function MapView({
   watchedHexes,
   basemapId,
   onBasemapChange,
+  cockpitRequest,
+  onCockpitRequestHandled,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MlMap | null>(null);
@@ -388,8 +454,29 @@ export default function MapView({
   const popupRef = useRef<Popup | null>(null);
   const spotMarkersRef = useRef<Marker[]>([]);
   const [mapError, setMapError] = useState(false);
+  const [threeD, setThreeD] = useState(false);
+  const [cockpitHex, setCockpitHex] = useState<string | null>(null);
+  const [hud, setHud] = useState<Hud | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const noteTimerRef = useRef(0);
   const basemapRef = useRef(basemapId);
+  const threeDRef = useRef(false);
+  const cockpitHexRef = useRef<string | null>(null);
+  const aircraftRef = useRef(aircraft);
+  const watchedRef = useRef(watchedHexes);
+  const configRef = useRef(config);
+  const motionRef = useRef(new MotionField());
+  const savedCamRef = useRef<{ center: [number, number]; zoom: number; pitch: number; bearing: number } | null>(null);
+  const lastHudRef = useRef(0);
+  const exitCockpitRef = useRef<() => void>(() => {});
+  const auto3dRef = useRef(false);
+  const mouseRef = useRef<[number, number] | null>(null);
   basemapRef.current = basemapId;
+  threeDRef.current = threeD;
+  cockpitHexRef.current = cockpitHex;
+  aircraftRef.current = aircraft;
+  watchedRef.current = watchedHexes;
+  configRef.current = config;
   onSelectRef.current = onSelect;
 
   // Apply basemap swaps triggered from the switcher (or restored preference changes).
@@ -408,6 +495,8 @@ export default function MapView({
         style: STYLE,
         center: [KLAX.lon, KLAX.lat],
         zoom: 9,
+        pitch: 0,
+        maxPitch: 85,
         attributionControl: { compact: true },
       });
     } catch (e) {
@@ -416,8 +505,11 @@ export default function MapView({
       return;
     }
     map.on("error", (e) => console.warn("map error", e?.error?.message ?? e));
+    map.on("webglcontextlost", () => console.warn("map: WebGL context lost"));
     mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+    if (import.meta.env.DEV) (window as unknown as { __hwlMap?: MlMap }).__hwlMap = map; // dev console aid
+    // Top-left under the Sky View button: bottom-right belongs to the detail panel + attribution.
+    map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-left");
 
     map.on("load", () => {
       applyBasemap(map, getBasemap(basemapRef.current));
@@ -453,7 +545,7 @@ export default function MapView({
 
       ensureAirportLayers(
         map,
-        config?.defaults.search_radius_nm ?? 250,
+        configRef.current?.defaults.search_radius_nm ?? 250,
         getBasemap(basemapRef.current).theme,
       );
 
@@ -464,7 +556,11 @@ export default function MapView({
         source: "aircraft",
         filter: ["any", ["==", ["get", "isTarget"], true], ["==", ["get", "inbound"], true]],
         paint: {
-          "circle-radius": ["case", ["==", ["get", "inbound"], true], 19, 14],
+          "circle-radius": [
+            "interpolate", ["linear"], ["zoom"],
+            3, ["case", ["==", ["get", "inbound"], true], 9, 6],
+            8, ["case", ["==", ["get", "inbound"], true], 19, 14],
+          ],
           "circle-color": ["get", "color"],
           "circle-opacity": 0.16,
           "circle-stroke-color": ["get", "color"],
@@ -505,11 +601,22 @@ export default function MapView({
           "icon-image": ["get", "icon"],
           "icon-rotate": ["get", "track"],
           "icon-rotation-alignment": "map",
-          "icon-size": ["get", "size"],
+          // Shrink icons as the view zooms out so the continental picture doesn't become a
+          // wall of silhouettes; full size from the SoCal zoom level inwards.
+          // (["zoom"] is only legal as the input of a top-level interpolate/step.)
+          "icon-size": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            2, ["*", ["get", "size"], 0.3],
+            4, ["*", ["get", "size"], 0.45],
+            6, ["*", ["get", "size"], 0.7],
+            8, ["get", "size"],
+          ],
           "icon-allow-overlap": true,
           "icon-ignore-placement": true,
         },
-        paint: { "icon-opacity": 0.98 },
+        paint: { "icon-opacity": ["get", "opacity"] },
       });
 
       // Interaction: hover popup + click to select.
@@ -532,6 +639,13 @@ export default function MapView({
       map.on("click", "ac-icons", (e) => {
         const f = e.features?.[0];
         if (f) onSelectRef.current((f.properties as { hex: string }).hex);
+        popup.remove(); // the detail panel takes over; a hover tip left behind goes stale as the plane moves
+      });
+      map.on("mousemove", (e) => {
+        mouseRef.current = [e.point.x, e.point.y];
+      });
+      map.on("mouseout", () => {
+        mouseRef.current = null;
       });
       map.on("mouseenter", "airport-dot", () => (map.getCanvas().style.cursor = "help"));
       map.on("mouseleave", "airport-dot", () => {
@@ -548,18 +662,24 @@ export default function MapView({
           .addTo(map);
       });
       map.on("click", (e) => {
+        if (!map.getLayer("ac-icons")) return;
         const hits = map.queryRenderedFeatures(e.point, { layers: ["ac-icons"] });
         if (hits.length === 0) onSelectRef.current(null);
       });
 
       loadedRef.current = true;
-      // Push any data that arrived before load.
+      if (threeDRef.current) {
+        setMap3d(map, true, getBasemap(basemapRef.current).theme);
+      }
+      // Push any data that arrived before load (read through refs: the closure's props are
+      // from the first render, and config usually lands before the style finishes loading).
       (map.getSource("aircraft") as maplibregl.GeoJSONSource)?.setData(
-        aircraftFeatures(aircraft, watchedHexes),
+        aircraftFeatures(aircraftRef.current, watchedRef.current),
       );
-      if (config) {
-        (map.getSource("runways") as maplibregl.GeoJSONSource)?.setData(runwayFeatures(config));
-        addSpotMarkers(map, config);
+      const cfg = configRef.current;
+      if (cfg) {
+        (map.getSource("runways") as maplibregl.GeoJSONSource)?.setData(runwayFeatures(cfg));
+        addSpotMarkers(map, cfg);
       }
     });
 
@@ -592,14 +712,87 @@ export default function MapView({
     }
   }
 
-  // Update aircraft data (also when the watchlist match set changes).
+  // Ingest each ADS-B snapshot into the motion field (the rAF loop paints the coast).
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !loadedRef.current) return;
-    (map.getSource("aircraft") as maplibregl.GeoJSONSource)?.setData(
-      aircraftFeatures(aircraft, watchedHexes),
-    );
-  }, [aircraft, watchedHexes]);
+    motionRef.current.ingest(aircraft, performance.now());
+  }, [aircraft]);
+
+  // Drive icons + cockpit camera from one rAF loop so planes keep flying between polls.
+  // The GeoJSON source is re-pushed at a cadence that matches what the eye can see at the
+  // current zoom (continental view: ~1 Hz; airport view: ~20 Hz) — re-tiling ~4,000 features
+  // 60 times a second buys nothing and burns the battery.
+  useEffect(() => {
+    let raf = 0;
+    let lastPush = 0;
+    let lostSince = 0;
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      const map = mapRef.current;
+      if (!map || !loadedRef.current) return;
+      const follow = cockpitHexRef.current;
+      const zoom = map.getZoom();
+      const cadence = follow ? 50 : zoom < 5.5 ? 1000 : zoom < 8 ? 150 : 50;
+      let posed: Aircraft[] | null = null;
+      if (now - lastPush >= cadence) {
+        lastPush = now;
+        posed = motionRef.current.applyTo(aircraftRef.current, now);
+        (map.getSource("aircraft") as maplibregl.GeoJSONSource | undefined)?.setData(
+          aircraftFeatures(posed, watchedRef.current, follow),
+        );
+        // Icons fly out from under a resting cursor: drop the hover tip once nothing is there.
+        const popup = popupRef.current;
+        const pt = mouseRef.current;
+        if (popup?.isOpen() && pt && map.getLayer("ac-icons")) {
+          const under = map.queryRenderedFeatures(pt, { layers: ["ac-icons", "airport-dot"] });
+          if (under.length === 0) popup.remove();
+        }
+      }
+      if (!follow) {
+        lostSince = 0;
+        return;
+      }
+      // Cockpit: the camera moves every frame; the HUD text 5×/s.
+      const ac = aircraftRef.current.find((a) => a.hex === follow);
+      const pose =
+        motionRef.current.pose(follow, now) ??
+        (ac?.lat != null && ac.lon != null
+          ? { lat: ac.lat, lon: ac.lon, alt: ac.altitude_ft, track: ac.track_deg ?? 0 }
+          : null);
+      if (!ac || !pose) {
+        // Target dropped out of the feed (landed, filtered, out of range): give it a few
+        // seconds to come back, then step back out rather than freezing on a stale view.
+        if (!lostSince) lostSince = now;
+        else if (now - lostSince > 6000) exitCockpitRef.current();
+        return;
+      }
+      lostSince = 0;
+      try {
+        applyCockpitCamera(map, pose, ac, configRef.current);
+      } catch {
+        /* camera animation in progress */
+      }
+      if (now - lastHudRef.current > 200) {
+        lastHudRef.current = now;
+        const list = cockpitCandidates(posed ?? aircraftRef.current);
+        const idx = list.findIndex((a) => a.hex === follow);
+        setHud({
+          hex: follow,
+          label: aircraftLabel(ac),
+          type: ac.type.friendly_name,
+          phase: flightPhase({ ...ac, altitude_ft: pose.alt }),
+          alt: fmtAlt(pose.alt),
+          gs: fmtSpeed(ac.ground_speed_kt),
+          hdg: `${Math.round(pose.track)}°`,
+          vs: fmtVrate(ac.vertical_rate_fpm),
+          rwy: ac.runway?.runway ? `${ac.runway.runway} · ${ac.distance_nm?.toFixed(1) ?? "—"} nm` : "",
+          idx,
+          total: list.length,
+        });
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   // Update runways + spots when config arrives.
   useEffect(() => {
@@ -632,27 +825,253 @@ export default function MapView({
     map.setFilter("ac-selected", ["==", ["get", "hex"], selectedHex ?? ""]);
   }, [selectedHex]);
 
-  // Fly to a focus target (e.g. clicked aircraft / spot).
+  // Fly to a focus target (e.g. clicked aircraft / spot). Only a *new* focus should fly —
+  // toggling 3D or leaving the cockpit must not re-run the last flight.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !focus) return;
-    map.flyTo({ center: [focus.lon, focus.lat], zoom: focus.zoom ?? Math.max(map.getZoom(), 10), speed: 0.8 });
+    if (!map || !focus || cockpitHexRef.current) return;
+    map.flyTo({
+      center: [focus.lon, focus.lat],
+      zoom: focus.zoom ?? Math.max(map.getZoom(), 10),
+      pitch: threeDRef.current ? Math.max(map.getPitch(), 50) : map.getPitch(),
+      speed: 0.8,
+    });
   }, [focus]);
+
+  function enable3d() {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    setMap3d(map, true, getBasemap(basemapRef.current).theme);
+    if (map.getPitch() < 40) {
+      map.easeTo({ pitch: 58, duration: 800 });
+    }
+    setThreeD(true);
+  }
+
+  function disable3d() {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    // Leaving 3D from the cockpit: restore where the user was, but flat.
+    const saved = cockpitHexRef.current ? savedCamRef.current : null;
+    exitCockpit(false);
+    setMap3d(map, false, getBasemap(basemapRef.current).theme);
+    map.easeTo({
+      ...(saved ? { center: saved.center, zoom: saved.zoom } : {}),
+      pitch: 0,
+      bearing: 0,
+      duration: 600,
+    });
+    setThreeD(false);
+  }
+
+  function enterCockpit(hex: string) {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    if (!cockpitHexRef.current) {
+      // Remember whether 3D was the user's choice or ours, so Exit lands them back where
+      // they were (flat map stays flat).
+      auto3dRef.current = !threeDRef.current;
+      savedCamRef.current = {
+        center: [map.getCenter().lng, map.getCenter().lat],
+        zoom: map.getZoom(),
+        pitch: map.getPitch(),
+        bearing: map.getBearing(),
+      };
+    }
+    if (!threeDRef.current) {
+      setMap3d(map, true, getBasemap(basemapRef.current).theme);
+      threeDRef.current = true;
+      setThreeD(true);
+    }
+    cockpitHexRef.current = hex; // let the very next frame pick it up
+    setCockpitHex(hex);
+    onSelect(hex);
+    popupRef.current?.remove();
+    try {
+      map.stop();
+      setMapInteractive(map, false);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function exitCockpit(restoreCamera = true) {
+    const map = mapRef.current;
+    if (!cockpitHexRef.current) return;
+    cockpitHexRef.current = null;
+    setCockpitHex(null);
+    setHud(null);
+    if (map) {
+      setMapInteractive(map, true);
+      const saved = savedCamRef.current;
+      savedCamRef.current = null;
+      if (auto3dRef.current) {
+        // We switched 3D on for the ride; switch it back off.
+        auto3dRef.current = false;
+        setMap3d(map, false, getBasemap(basemapRef.current).theme);
+        threeDRef.current = false;
+        setThreeD(false);
+      }
+      if (saved && restoreCamera) {
+        map.stop();
+        map.easeTo({ ...saved, duration: 700 });
+      }
+    }
+  }
+  exitCockpitRef.current = exitCockpit;
+
+  function cycleCockpit(dir: 1 | -1) {
+    const list = cockpitCandidates(aircraftRef.current);
+    if (list.length === 0) return;
+    const cur = cockpitHexRef.current;
+    const i = Math.max(0, list.findIndex((a) => a.hex === cur));
+    enterCockpit(list[(i + dir + list.length) % list.length].hex);
+  }
+
+  function startCockpit() {
+    if (cockpitHex) {
+      exitCockpit();
+      return;
+    }
+    const list = cockpitCandidates(aircraft);
+    const selected = aircraft.find((a) => a.hex === selectedHex && a.lat != null);
+    const pick = selected || list[0];
+    if (pick) enterCockpit(pick.hex);
+    else flashNote("No approach or departure to ride along with right now — pick any aircraft and use “Cockpit view”.");
+  }
+
+  function flashNote(text: string) {
+    setNote(text);
+    window.clearTimeout(noteTimerRef.current);
+    noteTimerRef.current = window.setTimeout(() => setNote(null), 3500);
+  }
+
+  // Detail-panel "Cockpit view" button.
+  useEffect(() => {
+    if (!cockpitRequest) return;
+    enterCockpit(cockpitRequest);
+    onCockpitRequestHandled();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cockpitRequest]);
 
   return (
     <>
       <div ref={containerRef} className="map-container" />
       {!mapError && (
-        <div className="basemap-switch">
-          {BASEMAPS.map((b) => (
-            <button
-              key={b.id}
-              className={b.id === basemapId ? "active" : ""}
-              onClick={() => onBasemapChange(b.id)}
-            >
-              {b.label}
-            </button>
-          ))}
+        <div className={`map-controls${cockpitHex ? " in-cockpit" : ""}`}>
+          <div className="map-controls-row">
+            <div className="basemap-switch mode-switch" title="3D terrain and cockpit">
+              <button
+                className={threeD ? "active" : ""}
+                onClick={() => (threeD ? disable3d() : enable3d())}
+                title={threeD ? "Back to the flat map" : "Tilt the map over 3D terrain"}
+              >
+                3D
+              </button>
+              <button
+                className={cockpitHex ? "active" : ""}
+                onClick={startCockpit}
+                title={cockpitHex ? "Leave the cockpit" : "Ride along on an approach or departure"}
+              >
+                Cockpit
+              </button>
+            </div>
+            <div className="basemap-switch">
+              {BASEMAPS.map((b) => (
+                <button
+                  key={b.id}
+                  className={b.id === basemapId ? "active" : ""}
+                  onClick={() => onBasemapChange(b.id)}
+                >
+                  {b.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="basemap-switch view-switch" title="Jump to a region">
+            {VIEWS.map((v) => (
+              <button
+                key={v.id}
+                onClick={() => {
+                  if (cockpitHex) exitCockpit(false);
+                  mapRef.current?.flyTo({
+                    center: v.center,
+                    zoom: v.zoom,
+                    pitch: threeD ? (v.id === "lax" ? 60 : v.id === "socal" ? 50 : 35) : 0,
+                    bearing: threeD && v.id === "lax" ? (flow === "west" ? 250 : 70) : 0,
+                    speed: 1.1,
+                  });
+                }}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {note && !cockpitHex && <div className="map-note">{note}</div>}
+      {cockpitHex && (
+        <div className="cockpit-hud">
+          {!hud ? (
+            <div className="cockpit-top">
+              <div>
+                <div className="cockpit-call">Climbing aboard…</div>
+                <div className="cockpit-sub">Waiting for the next position fix</div>
+              </div>
+              <button className="mini" onClick={() => exitCockpit()}>
+                Exit
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="cockpit-top">
+                <div>
+                  <div className="cockpit-call">{hud.label}</div>
+                  <div className="cockpit-sub">
+                    {hud.type}
+                    <span className={`cockpit-phase ${hud.phase}`}>{hud.phase}</span>
+                    {hud.rwy && <span> · {hud.rwy}</span>}
+                  </div>
+                </div>
+                <button className="mini" onClick={() => exitCockpit()}>
+                  Exit
+                </button>
+              </div>
+              <div className="cockpit-dials">
+                <div>
+                  <em>ALT</em>
+                  <b>{hud.alt}</b>
+                </div>
+                <div>
+                  <em>GS</em>
+                  <b>{hud.gs}</b>
+                </div>
+                <div>
+                  <em>HDG</em>
+                  <b>{hud.hdg}</b>
+                </div>
+                <div>
+                  <em>VS</em>
+                  <b>{hud.vs}</b>
+                </div>
+              </div>
+              {hud.total > 0 && (
+                <div className="cockpit-nav">
+                  <button className="mini" onClick={() => cycleCockpit(-1)} disabled={hud.total < 2 && hud.idx >= 0}>
+                    ◀ Prev
+                  </button>
+                  <span>
+                    {hud.idx >= 0
+                      ? `${hud.idx + 1} of ${hud.total} arriving / departing LAX`
+                      : `${hud.total} arriving / departing LAX`}
+                  </span>
+                  <button className="mini" onClick={() => cycleCockpit(1)} disabled={hud.total < 2 && hud.idx >= 0}>
+                    Next ▶
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
       {mapError && (

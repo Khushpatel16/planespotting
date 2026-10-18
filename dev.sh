@@ -6,9 +6,28 @@ cd "$(dirname "$0")"
 
 # --- backend ---
 cd backend
+
+# Pick an interpreter the pinned deps have wheels for (3.10-3.13). Newer CPython releases
+# (e.g. 3.14) force greenlet/pydantic-core to build from source, which fails without a
+# Rust toolchain. Override with HWL_PYTHON=/path/to/python if needed.
+pick_python() {
+  if [ -n "${HWL_PYTHON:-}" ]; then echo "$HWL_PYTHON"; return; fi
+  for p in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$p" >/dev/null 2>&1; then echo "$p"; return; fi
+  done
+  echo "python3"
+}
+
+# A venv copied from another machine/user (or built against a since-removed Python) has a
+# dangling interpreter symlink; detect that and rebuild instead of failing on startup.
+if [ -d .venv ] && ! ./.venv/bin/python -c "import uvicorn" >/dev/null 2>&1; then
+  echo "Existing .venv is broken or incomplete - rebuilding..."
+  rm -rf .venv
+fi
 if [ ! -d .venv ]; then
-  echo "Creating Python venv + installing deps..."
-  python3 -m venv .venv
+  PY="$(pick_python)"
+  echo "Creating Python venv with $("$PY" --version 2>&1) + installing deps..."
+  "$PY" -m venv .venv
   ./.venv/bin/pip install -q --upgrade pip
   ./.venv/bin/pip install -q -r requirements.txt
 fi

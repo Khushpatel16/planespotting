@@ -22,7 +22,10 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
    the whole UI follows with a matching light or dark-radar theme. Nearby airports are
    pinned so ground traffic makes sense. Click any aircraft for a detail panel with a
    **real photo of that airframe** (planespotters.net, credited), reg, operator,
-   type + variant, route, altitude, speed, vertical rate, and distance.
+   type + variant, route, altitude, speed, vertical rate, and distance. Aircraft **keep
+   moving between ADS-B updates** (dead-reckoned on last speed/heading). A **3D** toggle
+   pitches the map over real terrain (and extruded buildings when zoomed in); **Cockpit**
+   locks the camera onto an approach or departure looking down the runway.
 2. **Inbound alerts (the killer feature).** Detects a 747/A380 that is *inbound to LAX*
    (descending/low, within the alert radius, tracking the field, inside the active
    approach corridor) and raises an alert card + **browser notification** + optional
@@ -52,6 +55,30 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
    optional photo, persisted to a database. Stats dashboard: A380s by operator, 747
    variants caught, rarest catches, sightings over time, and a heatmap of when heavies
    tend to show up.
+9. **North-America-wide coverage.** Beyond the fast 7 s LAX loop, a background sweep
+   tiles the whole continent (USA, Canada, Mexico — 83 overlapping 250 nm tiles, one
+   polite request every ~1.5 s, a full pass every ~2 min) and merges the result into the
+   map. Jump between **LAX / SoCal / West / N. America** views; sweep positions fade with
+   age so you can tell a 2-minute-old fix from the live LAX picture. LAX alerts, runway
+   logic and the heavies list are unchanged.
+10. **Filters: country · state · traffic class.** Every aircraft is tagged with the
+    **country** it's over (USA / Canada / Mexico, point-in-polygon against Natural Earth
+    boundaries), the **US state**, and a set of **traffic classes**: All, Passenger,
+    Cargo, A300 Cargo, A320 family, A320 Cargo, A330 family, A330 Cargo, A350s, A350 Cargo,
+    A380s, B737 family, B737 Cargo, B747s, B757s, B767s, B777s, Cargo B747s/757s/767s/777s,
+    **BBJ** (Boeing Business Jets) and **MD** (McDonnell Douglas). Classification combines
+    the ICAO type, the operator (cargo airline?) and the feed's airframe description
+    (e.g. "767-300 BDSF", "737-7 BBJ"). Counts update live in every dropdown.
+11. **Live ATC.** An ATC tab with every LiveATC feed for **61 North American airports**
+    (884 feeds with published frequencies), grouped by Tower / Ground / Clearance / ATIS /
+    Approach / Departure / Center. LAX gets one-tap presets for the **north-complex tower
+    (24L/24R, 133.9)**, the **south-complex tower (25L/25R, 120.95)**, both at once, finals,
+    and ground; runway tags flip to 06/07 in east flow. Several feeds can play together with
+    independent volume, and audio keeps playing while you use other tabs. Played feeds
+    are **live-captioned** a few seconds after each transmission (Whisper `medium.en`
+    running on this server; callsigns and numbers are often wrong — for following along
+    only). See the attribution note below — there is no government ATC stream; this is
+    LiveATC.net.
 
 ![Stats dashboard](docs/screenshot-stats.png)
 
@@ -61,9 +88,9 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
 
 | Layer     | Tech |
 |-----------|------|
-| Backend   | Python · FastAPI · httpx · WebSocket · SQLAlchemy (async) |
+| Backend   | Python · FastAPI · httpx · WebSocket · SQLAlchemy (async) · faster-whisper (ATC captions) |
 | Frontend  | React · TypeScript · Vite · MapLibre GL |
-| Data       | [adsb.lol](https://api.adsb.lol/docs) (primary) → airplanes.live → OpenSky (fallbacks); [aviationweather.gov](https://aviationweather.gov/data/api/) METAR; VRS standing-data routes; [planespotters.net](https://www.planespotters.net/photo/api) photos |
+| Data       | [adsb.lol](https://api.adsb.lol/docs) (primary) → [adsb.fi](https://github.com/adsbfi/opendata) → airplanes.live → OpenSky (fallbacks); [aviationweather.gov](https://aviationweather.gov/data/api/) METAR; VRS standing-data routes; [planespotters.net](https://www.planespotters.net/photo/api) photos |
 | Storage   | SQLite locally · managed Postgres (Neon/Supabase/Render) in prod |
 | Tests     | pytest (geo math, flow, runway, type/operator decode, pipeline) |
 
@@ -85,7 +112,8 @@ immediately.
 
 ## Quick start (local)
 
-**Prerequisites:** Python 3.10+, Node 20+.
+**Prerequisites:** Python 3.10–3.13 (the pinned deps have no wheels for 3.14 yet;
+`dev.sh` picks the newest compatible interpreter it finds, or set `HWL_PYTHON`), Node 20+.
 
 ```bash
 ./dev.sh
@@ -196,8 +224,36 @@ from the known KLAX spots:
   `BLCF` are freighters) and refined by the operator (a cargo callsign like `GTI`/`CLX`/`UPS`
   resolves an ambiguous `B748` to a freighter).
 - **Operator** is decoded from the callsign's 3-letter ICAO airline prefix
-  (`UAE`→Emirates, `QFA`→Qantas, `KAL`→Korean Air, …) via a curated table focused on
-  heavy/widebody and cargo operators at LAX.
+  (`UAE`→Emirates, `QFA`→Qantas, `KAL`→Korean Air, …) via a curated table of heavy/
+  widebody and cargo operators at LAX plus the US/Canadian/Mexican mainline, low-cost,
+  regional and freight carriers needed for the continent-wide passenger/cargo filter.
+
+### Traffic classes & regions (`domain/traffic.py`, `domain/regions.py`)
+
+- **Traffic classes** are a *set* per aircraft (an Atlas 747-8F is `cargo`, `b747` and
+  `b747_cargo`). Cargo = freighter-only type (`B77F`, `B74F`, `A3ST`, …) **or** a cargo
+  operator **or** a freighter hint in the feed's airframe description (`BCF`, `BDSF`, `P2F`,
+  `-200F`, "Freighter"). Passenger = an airliner type or known airline that isn't cargo.
+  **BBJ** = "BBJ"/"business jet" in the description, or a Boeing airliner flying on a
+  registration (no airline callsign) and not a known operator. A300s are classed cargo
+  by nature (no passenger A300s remain in NA service).
+- **Country / state** is a ray-cast point-in-polygon against vendored Natural Earth 1:110m
+  boundaries (public domain, 57 KB). The 110m set is coarse at coastlines, so a point
+  that misses every polygon is snapped to the nearest boundary within ~60 nm — arrivals
+  over Santa Monica Bay are "CA, USA", not "offshore". Lookups are memoised on a 0.1°
+  grid (≈10 µs each warm).
+
+### North America sweep (`wide.py`)
+
+The open ADS-B APIs only answer point + radius (≤250 nm) queries, so the continent is
+covered by 83 overlapping circles along 12 latitude rows shaped to the land mass. Tiles
+are fetched one at a time (`HWL_WIDE_TILE_INTERVAL_SECONDS`, default 1.5 s) from
+`HWL_WIDE_SOURCES` (default adsb.fi then adsb.lol, with the same 429/403 cooldowns as the
+LAX poller — if every source is cooling down the sweep pauses rather than burning tiles).
+Positions are merged by hex (newest wins), aged out after `HWL_WIDE_MAX_AGE_SECONDS`, and
+enriched through the same pipeline as the LAX snapshot. `GET /api/wide` filters
+server-side and excludes the LAX radius by default (the WebSocket snapshot already has it,
+fresher); the client overlays the two. Set `HWL_WIDE_ENABLED=false` to turn it off.
 
 ---
 
@@ -208,13 +264,16 @@ from the known KLAX spots:
 | `GET`  | `/api/health` | liveness + client count |
 | `GET`  | `/api/config` | airport, runways, spots, type sets, defaults (frontend bootstrap) |
 | `GET`  | `/api/snapshot` | latest enriched snapshot (same shape as the WS push) |
+| `GET`  | `/api/wide` | North-America sweep: `?country=USA\|CAN\|MEX&state=CA&traffic=<class id>&include_local=false&limit=` (gzip) |
 | `POST` | `/api/flow` | `{ "flow": "west" \| "east" \| null }` set/clear manual flow override |
 | `GET`  | `/api/recommend` | `?flow=&phase=&side=&distance_nm=` spotting recommendation |
 | `GET`  | `/api/photo/{hex}` | `?reg=` airframe photo thumbnail + photographer credit (proxied + cached) |
 | `GET`/`POST`/`DELETE` | `/api/sightings[/{id}]` | logbook CRUD |
 | `POST` | `/api/sightings/{id}/photo` | multipart photo upload |
 | `GET`  | `/api/stats` | aggregated logbook stats |
+| `GET`  | `/api/atc/captions/status` | Whisper engine + which feeds are being captioned |
 | `WS`   | `/ws` | live `Snapshot` stream (one message per poll) |
+| `WS`   | `/ws/atc/{mount}` | live captions for one LiveATC mount (`?hint=` primes the model) |
 
 ---
 
@@ -248,18 +307,25 @@ normalized to the async driver automatically — just set `HWL_DATABASE_URL`.
 
 See [`backend/.env.example`](backend/.env.example). Key ones: `HWL_POLL_INTERVAL_SECONDS`,
 `HWL_SEARCH_RADIUS_NM`, `HWL_ADSB_SOURCES`, `HWL_ALERT_RADIUS_NM`, `HWL_DATABASE_URL`,
-`HWL_UPLOADS_DIR`, `HWL_CORS_ORIGINS`, `HWL_USER_AGENT`.
+`HWL_UPLOADS_DIR`, `HWL_CORS_ORIGINS`, `HWL_USER_AGENT`, and for the continental sweep
+`HWL_WIDE_ENABLED`, `HWL_WIDE_SOURCES`, `HWL_WIDE_TILE_INTERVAL_SECONDS`, and for captions
+`HWL_ATC_TRANSCRIBE_ENABLED`, `HWL_ATC_TRANSCRIBE_MODEL`.
 
 ---
 
 ## Data attribution
 
 This project uses free, public data sources. Please respect their terms and keep
-attribution visible (the map carries OSM/CARTO attribution in-app):
+attribution visible (the map carries OSM/Esri attribution in-app):
 
 - **ADS-B (primary): [adsb.lol](https://adsb.lol/)** — data licensed under the
   **Open Database License (ODbL)**. © adsb.lol contributors.
+- **ADS-B fallback: [adsb.fi](https://adsb.fi/)** open-data API — free, key-less, same
+  schema as adsb.lol; please keep polling at ~1 req/s or slower.
 - **ADS-B fallback: [airplanes.live](https://airplanes.live/)** — per their API usage terms.
+  Their API now returns **403 until you've requested access** by emailing
+  contact@airplanes.live with a project description; the app backs off for 10 min on 403
+  and moves on to the next source.
 - **ADS-B fallback: [The OpenSky Network](https://opensky-network.org/)** — for research/
   non-commercial use; live API is rate-limited (note: OpenSky state vectors carry no type
   code, so heavy detection is unavailable from this source).
@@ -270,12 +336,29 @@ attribution visible (the map carries OSM/CARTO attribution in-app):
   non-commercial use; photographer credit + backlink are shown in-app, and lookups are
   proxied/cached server-side with a descriptive User-Agent (**set a real contact in
   `HWL_USER_AGENT`** or photo lookups will be rejected).
-- **Basemaps: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors,
-  © [CARTO](https://carto.com/attributions)** (Voyager/dark raster tiles); satellite
-  **imagery © Esri, Maxar, Earthstar Geographics**.
+- **Basemaps:** "Map" = **© [OpenStreetMap](https://www.openstreetmap.org/copyright)
+  contributors** standard tiles (light use only, per the
+  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/)); "Dark" =
+  **Esri Dark Gray Canvas (© Esri, HERE, Garmin, © OpenStreetMap contributors)**;
+  "Satellite" = **imagery © Esri, Maxar, Earthstar Geographics**. Map label glyphs are
+  served by [OpenFreeMap](https://openfreemap.org/). (CARTO's public raster tiles now
+  require an API key, so they are no longer used.)
 
-Poll politely (the default ~7 s interval is well within source guidance) and set a
-descriptive `HWL_USER_AGENT`.
+- **Boundaries: [Natural Earth](https://www.naturalearthdata.com/)** 1:110m admin-0 /
+  admin-1 (public domain), vendored as `backend/app/data/na_boundaries.json`.
+- **3D terrain:** [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)
+  (Mapzen Terrarium / SRTM), proxied so the browser can read them. Buildings from
+  [OpenFreeMap](https://openfreemap.org/) (© OpenStreetMap contributors).
+- **Live ATC audio: [LiveATC.net](https://www.liveatc.net/).** There is **no government
+  ATC stream** — the FAA does not publish live audio; everything online is LiveATC's
+  volunteer scanner network. The in-app catalog (feed names, stream mounts, frequencies)
+  was captured from LiveATC's airport pages; audio streams from LiveATC straight into the
+  browser. LiveATC's terms state *"Audio streams may not be used in any third-party
+  products"*, so treat the in-app player as **personal use**; the panel links every feed
+  to LiveATC's own player, and if you publish this app you should switch to those links.
+
+Poll politely (the default ~7 s LAX interval and ~1.5 s sweep tile interval are within
+source guidance) and set a descriptive `HWL_USER_AGENT`.
 
 ---
 
@@ -290,3 +373,17 @@ descriptive `HWL_USER_AGENT`.
   ADS-B), not image recognition. Phone compasses are typically ±10–15°; drag to fine-tune
   alignment. Camera and sensors require HTTPS (or localhost).
 - Browser notifications require permission and an open tab.
+- The **North America layer** is a slow sweep (~2 min per pass), so positions outside the
+  LAX radius can be up to a couple of minutes old — icons fade with age and the detail
+  panel shows the fix age. Country/state uses 1:110m boundaries, so right on a border or
+  coastline the attribution can be off by ~10 km. Traffic class is inferred (type +
+  operator + description), so a one-off charter or a converted freighter the feed doesn't
+  describe can be misclassed.
+- **ATC feeds** depend on volunteer receivers: some are offline at times, and a feed
+  takes ~5–10 s to buffer before audio starts.
+- **Live captions** are machine speech-to-text (Whisper) of a noisy, compressed scanner
+  feed — not an official transcript. Callsigns, runway numbers and readbacks are often
+  wrong or dropped; dimmed lines are low-confidence. The first start downloads the model
+  (~1.5 GB); later starts take about a second. Captioning a feed costs one extra LiveATC
+  listener connection (the browser cannot tap the decoded audio because LiveATC has no
+  CORS). Set `HWL_ATC_TRANSCRIBE_ENABLED=false` to turn them off.
