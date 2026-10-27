@@ -1,15 +1,18 @@
 # 🛬 Heavy Watch LAX
 
 A real-time radar for plane spotters who chase **Boeing 747s** and **Airbus A380s** at
-Los Angeles International (**KLAX**). It polls public ADS-B data server-side, enriches it
-with type/operator intelligence and KLAX-specific geometry, and pushes a live picture to
-the browser over WebSocket — with **inbound alerts**, **flow-aware spotting
-recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook**.
+Los Angeles International (**KLAX**) — with the whole of **North America** one click away.
+It polls public ADS-B data server-side, enriches it with type/operator intelligence and
+KLAX-specific geometry, and pushes a live picture to the browser over WebSocket — with
+**inbound alerts**, **flow-aware spotting recommendations**, **ETA + likely-runway
+estimates**, **live ATC audio with captions**, a **3D / cockpit view**, and a
+**sightings logbook**.
 
-![Live map](docs/screenshot-map.png)
+![Live map](docs/screenshot-map.jpg)
 
-> **Live URL:** _not yet deployed_ — this build is local-first. One-command deploy
-> blueprints for Render / Fly.io / Docker are included (see [Deployment](#deployment)).
+> **Live URL:** _not yet deployed_ — this build is local-first. A `Dockerfile` plus
+> Render / Fly.io / Docker Compose blueprints are included; see [Deployment](#deployment)
+> for what works on today's free tiers.
 
 ---
 
@@ -23,45 +26,56 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
    pinned so ground traffic makes sense. Click any aircraft for a detail panel with a
    **real photo of that airframe** (planespotters.net, credited), reg, operator,
    type + variant, route, altitude, speed, vertical rate, and distance. Aircraft **keep
-   moving between ADS-B updates** (dead-reckoned on last speed/heading). A **3D** toggle
-   pitches the map over real terrain (and extruded buildings when zoomed in); **Cockpit**
-   locks the camera onto an approach or departure looking down the runway.
-2. **Inbound alerts (the killer feature).** Detects a 747/A380 that is *inbound to LAX*
+   moving between ADS-B updates**: each icon is dead-reckoned along its last speed and
+   heading and blended onto the next fix, so the picture is smooth instead of jumping
+   every few seconds.
+2. **3D map + Cockpit view.** The **3D** toggle tilts the map over real terrain (AWS/Mapzen
+   elevation tiles, hillshade, sky) with extruded OSM buildings when zoomed in. **Cockpit**
+   climbs aboard an aircraft on approach or departure: the camera locks to its heading and
+   looks toward the runway threshold while a HUD shows altitude, ground speed, heading,
+   vertical speed, phase and assigned runway. **Prev / Next** cycle through everything
+   currently arriving or departing LAX, or hit **Cockpit view** on any aircraft's detail
+   panel. Exit puts you back exactly where you were.
+
+   ![Cockpit view](docs/screenshot-cockpit.jpg)
+
+3. **Inbound alerts (the killer feature).** Detects a 747/A380 that is *inbound to LAX*
    (descending/low, within the alert radius, tracking the field, inside the active
    approach corridor) and raises an alert card + **browser notification** + optional
    **chime**: _"UAE215 (A380, Emirates) ~25 min out — likely landing 25L — head to
    In-N-Out."_ Configure the radius and which types trigger alerts.
-3. **Custom watchlist.** Per-aircraft alert rules — operator, family, type code,
+4. **Custom watchlist.** Per-aircraft alert rules — operator, family, type code,
    registration, callsign, destination, optionally inbound-only (e.g. _"Lufthansa A380"_,
    _"any 747 freighter to ANC"_, or one-click **Watch this aircraft** from the detail
    panel). Matches surface as cards, notifications, and a purple ring on the map.
-4. **Sky View (point your phone at the sky).** Camera + compass + GPS + the live feed:
+5. **Sky View (point your phone at the sky).** Camera + compass + GPS + the live feed:
    an AR overlay that labels which aircraft you're looking at — callsign, type, operator,
    altitude, distance, route, and ETA if inbound — with a compass ribbon showing traffic
    all around you. Positions are dead-reckoned between polls. Works best outdoors on a
    phone (needs HTTPS; see `npm run dev:phone`); on desktop you can drag to look around.
-5. **Flow + spotting recommender.** Pulls the live KLAX METAR, infers **west vs east
+6. **Flow + spotting recommender.** Pulls the live KLAX METAR, infers **west vs east
    flow** from the wind, and recommends the best spotting location for the situation
    (arrival vs departure × flow × side), including which direction traffic appears from
    and roughly how low. Shows a **runway diagram** with the active direction highlighted.
    Manual flow override included.
-6. **ETA + runway estimate.** From live position, ground speed and track it computes
+7. **ETA + runway estimate.** From live position, ground speed and track it computes
    great-circle distance to the threshold, an ETA, and the likely landing runway (north
    vs south complex). Simple, documented, explicitly heuristic.
-7. **Routes.** Origin → destination per callsign for every widebody in range (VRS
+8. **Routes.** Origin → destination per callsign for every widebody in range (VRS
    standing-data via adsb.lol, cached politely server-side) — feeds the detail panel and
    watchlist destination rules.
-8. **Logbook + stats.** Log a sighting (auto-filled from the selected aircraft) with an
+9. **Logbook + stats.** Log a sighting (auto-filled from the selected aircraft) with an
    optional photo, persisted to a database. Stats dashboard: A380s by operator, 747
    variants caught, rarest catches, sightings over time, and a heatmap of when heavies
    tend to show up.
-9. **North-America-wide coverage.** Beyond the fast 7 s LAX loop, a background sweep
-   tiles the whole continent (USA, Canada, Mexico — 83 overlapping 250 nm tiles, one
-   polite request every ~1.5 s, a full pass every ~2 min) and merges the result into the
-   map. Jump between **LAX / SoCal / West / N. America** views; sweep positions fade with
-   age so you can tell a 2-minute-old fix from the live LAX picture. LAX alerts, runway
-   logic and the heavies list are unchanged.
-10. **Filters: country · state · traffic class.** Every aircraft is tagged with the
+10. **North-America-wide coverage.** Beyond the fast 7 s LAX loop, a background sweep
+    tiles the whole continent (USA, Canada, Mexico — 83 overlapping 250 nm tiles, one
+    polite request every ~1.5 s, a full pass every ~2 min) and merges the result into the
+    map when you switch on **+ North America** in the filter panel. Jump between
+    **LAX / SoCal / West / N. America** views; sweep positions fade with age so you can
+    tell a 2-minute-old fix from the live LAX picture. LAX alerts, runway logic and the
+    heavies list are unchanged.
+11. **Filters: country · state · traffic class.** Every aircraft is tagged with the
     **country** it's over (USA / Canada / Mexico, point-in-polygon against Natural Earth
     boundaries), the **US state**, and a set of **traffic classes**: All, Passenger,
     Cargo, A300 Cargo, A320 family, A320 Cargo, A330 family, A330 Cargo, A350s, A350 Cargo,
@@ -69,7 +83,7 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
     **BBJ** (Boeing Business Jets) and **MD** (McDonnell Douglas). Classification combines
     the ICAO type, the operator (cargo airline?) and the feed's airframe description
     (e.g. "767-300 BDSF", "737-7 BBJ"). Counts update live in every dropdown.
-11. **Live ATC.** An ATC tab with every LiveATC feed for **61 North American airports**
+12. **Live ATC.** An ATC tab with every LiveATC feed for **61 North American airports**
     (884 feeds with published frequencies), grouped by Tower / Ground / Clearance / ATIS /
     Approach / Departure / Center. LAX gets one-tap presets for the **north-complex tower
     (24L/24R, 133.9)**, the **south-complex tower (25L/25R, 120.95)**, both at once, finals,
@@ -88,11 +102,11 @@ recommendations**, **ETA + likely-runway estimates**, and a **sightings logbook*
 
 | Layer     | Tech |
 |-----------|------|
-| Backend   | Python · FastAPI · httpx · WebSocket · SQLAlchemy (async) · faster-whisper (ATC captions) |
-| Frontend  | React · TypeScript · Vite · MapLibre GL |
-| Data       | [adsb.lol](https://api.adsb.lol/docs) (primary) → [adsb.fi](https://github.com/adsbfi/opendata) → airplanes.live → OpenSky (fallbacks); [aviationweather.gov](https://aviationweather.gov/data/api/) METAR; VRS standing-data routes; [planespotters.net](https://www.planespotters.net/photo/api) photos |
-| Storage   | SQLite locally · managed Postgres (Neon/Supabase/Render) in prod |
-| Tests     | pytest (geo math, flow, runway, type/operator decode, pipeline) |
+| Backend   | Python 3.10–3.13 · FastAPI · httpx · WebSocket · SQLAlchemy (async) · faster-whisper + PyAV (ATC captions) |
+| Frontend  | React 18 · TypeScript (strict) · Vite 5 · MapLibre GL 4 (raster basemaps, 3D terrain, hillshade, fill-extrusion buildings) |
+| Data      | [adsb.lol](https://api.adsb.lol/docs) → [adsb.fi](https://github.com/adsbfi/opendata) → airplanes.live → OpenSky (tried in order, with per-source cooldowns); [aviationweather.gov](https://aviationweather.gov/data/api/) METAR; VRS standing-data routes; [planespotters.net](https://www.planespotters.net/photo/api) photos; [LiveATC](https://www.liveatc.net/) audio; AWS Terrain Tiles; OpenFreeMap buildings/glyphs |
+| Storage   | SQLite locally · managed Postgres (Neon/Supabase/Render) in prod · uploads on disk |
+| Tests     | pytest — 119 tests (geo math, flow, runway, approach, type/operator decode, traffic classes + regions, pipeline, routes/photos, DB URL normalisation, caption segmenter/cleanup) |
 
 ### Pipeline
 
@@ -106,7 +120,41 @@ METAR ─────────┘                                          �
 
 A single background poll loop (every ~7 s) builds one `Snapshot` and broadcasts it to all
 connected clients; REST endpoints and newly-connected sockets get the latest snapshot
-immediately.
+immediately. Two more background loops run alongside it: the **North America sweep**
+(`wide.py`, one tile every ~1.5 s) and, on demand, the **ATC caption workers**
+(`atc_transcribe.py`, one LiveATC download + Whisper session per captioned feed).
+
+### Project layout
+
+```
+backend/
+  app/
+    main.py            FastAPI app: REST + /ws + /ws/atc, lifespan (loops), SPA static hosting
+    config.py          HWL_* settings (pydantic-settings; see backend/.env.example)
+    constants.py       KLAX runways, thresholds, spotting locations
+    models.py          Pydantic models shared with the frontend types (Snapshot, Aircraft, …)
+    poller.py / ws.py  7 s poll loop + WebSocket fan-out
+    pipeline.py        snapshot assembly (enrich + geo-compute)
+    wide.py            North-America tile sweep
+    atc_transcribe.py  LiveATC stream -> PCM -> VAD segmenter -> faster-whisper -> captions
+    store.py           logbook persistence + stats (SQLAlchemy async; SQLite or Postgres)
+    sources/           adsb (multi-source + cooldowns), metar, routes, photos
+    domain/            flow, approach, runway, spotting, aircraft_types, operators, traffic, regions, geo
+    data/              airline table + vendored Natural Earth boundaries
+  tests/               pytest suite
+frontend/
+  src/
+    App.tsx            layout, tabs, filter state, hooks wiring
+    components/        MapView (map, 3D, cockpit), DetailPanel, AlertsPanel, Watchlist, FilterBar,
+                       FlowPanel, SpottingPanel, AircraftList, AtcPanel + AtcTranscript, SkyView,
+                       Logbook, StatsDashboard, StatusBar
+    hooks/             useSnapshot (WS), useWide, useAtcAudio, useAtcTranscript, useWatchlist,
+                       useNotifications, useDeviceOrientation
+    lib/               geo, motion (dead-reckoning), cockpit (camera), map3d (terrain/sky/buildings),
+                       basemaps, airports, atcFeeds, format, colors, chime
+    data/atcFeeds.json LiveATC catalog (61 airports / 884 feeds)
+Dockerfile · docker-compose.yml · render.yaml · fly.toml · dev.sh
+```
 
 ---
 
@@ -122,14 +170,21 @@ immediately.
 ```
 
 `dev.sh` creates the Python venv, installs both sets of deps, and runs the FastAPI backend
-(`:8000`) plus the Vite dev server (`:5173`, which proxies `/api` and `/ws` to the
-backend). No API keys required — all data sources are free and key-less.
+(`:8000`) plus the Vite dev server (`:5173`, which proxies `/api`, `/uploads` and `/ws` to
+the backend). No API keys required — all data sources are free and key-less.
+
+**First start takes a while:** captions are on by default and the backend downloads the
+Whisper `medium.en` model (~1.5 GB) into `~/.cache/huggingface` before it reports ready.
+Set `HWL_ATC_TRANSCRIBE_ENABLED=false` in `backend/.env` to skip that (the ATC audio
+player still works without captions), or `HWL_ATC_TRANSCRIBE_MODEL=small.en` on a slower
+machine. The North America sweep needs ~2 minutes for its first full pass; the LAX picture
+is live within seconds.
 
 ### Run the tests
 
 ```bash
-cd backend && . .venv/bin/activate && pytest          # 65 unit tests
-cd frontend && npm run build                           # type-check + production build
+cd backend && . .venv/bin/activate && pytest          # 119 unit tests, < 1 s
+cd frontend && npm run build                           # tsc type-check + production build
 ```
 
 ### Test Sky View on your phone
@@ -271,24 +326,66 @@ fresher); the client overlays the two. Set `HWL_WIDE_ENABLED=false` to turn it o
 | `GET`/`POST`/`DELETE` | `/api/sightings[/{id}]` | logbook CRUD |
 | `POST` | `/api/sightings/{id}/photo` | multipart photo upload |
 | `GET`  | `/api/stats` | aggregated logbook stats |
-| `GET`  | `/api/atc/captions/status` | Whisper engine + which feeds are being captioned |
+| `GET`  | `/api/atc/captions/status` | Whisper engine state + which feeds are being captioned |
+| `GET`  | `/api/terrain/{z}/{x}/{y}` | Terrarium elevation tile proxy for the 3D map (S3 has no CORS); `z ≤ 15`, cached 1 day |
 | `WS`   | `/ws` | live `Snapshot` stream (one message per poll) |
-| `WS`   | `/ws/atc/{mount}` | live captions for one LiveATC mount (`?hint=` primes the model) |
+| `WS`   | `/ws/atc/{mount}` | live captions for one LiveATC mount (`?hint=` primes the model); sends `atc_status`, `atc_lines` (history), `atc_line` |
+
+The built frontend (`frontend/dist`) is served at `/` by the same process when present, so
+a single origin covers the SPA, API, uploads and both WebSockets.
 
 ---
 
 ## Deployment
 
 The recommended shape is a **single full-stack service** (the FastAPI app serves the built
-React SPA, runs the ADS-B poll loop, and pushes over WebSocket) plus **managed Postgres**
-for the logbook. The provided `Dockerfile` builds the frontend and bakes it into the
-backend image.
+React SPA, runs the poll loops, and pushes over WebSocket) plus **managed Postgres** for
+the logbook. The provided `Dockerfile` builds the frontend and bakes it into the backend
+image. Because of the WebSockets and the always-on pollers this needs a **long-running
+server**, not a serverless/static host (Vercel, Netlify, GitHub Pages won't work on their
+own).
 
-**Render** (`render.yaml` blueprint — web service + free Postgres + uploads disk):
-push to GitHub → *New ▸ Blueprint* → select the repo. `HWL_DATABASE_URL` is wired from the
-managed database automatically.
+**What the app needs from a host**
 
-**Fly.io** (`fly.toml`):
+| | Minimum | Comfortable |
+|---|---|---|
+| Without captions (`HWL_ATC_TRANSCRIBE_ENABLED=false`) | 512 MB RAM, shared CPU | 1 GB |
+| With captions, `small.en` | ~1.5 GB RAM, 2 cores | 4 GB |
+| With captions, `medium.en` (default) | ~2.5 GB RAM, 4 cores | 8 GB — this is what the defaults assume |
+
+Free tiers can't run `medium.en`; turn captions off or pick `small.en`.
+
+### Free hosting (as of Oct 2026)
+
+**Option A — Render free web service + Neon Postgres** (easiest). Render's free plan is
+512 MB / 0.1 CPU, sleeps after 15 min without HTTP *or WebSocket* traffic (~1 min cold
+start), and has no persistent disk; Render's own free Postgres is deleted after 30 days,
+so use [Neon](https://neon.tech) instead.
+
+1. Push the repo to GitHub and create a free Neon database; copy its connection string.
+2. Render → *New ▸ Blueprint* → pick the repo. `render.yaml` as shipped also provisions a
+   paid uploads disk and a Render Postgres — delete the `disk:` and `databases:` blocks
+   for the free plan.
+3. Set env vars: `HWL_DATABASE_URL` (Neon URL), `HWL_ATC_TRANSCRIBE_ENABLED=false`,
+   `HWL_USER_AGENT` with a real contact.
+
+Logbook text persists in Neon; uploaded photos live on the ephemeral disk and vanish when
+the service sleeps or redeploys.
+
+**Option B — Oracle Cloud Always Free ARM VM** (everything works, never sleeps). The
+Always Free `VM.Standard.A1.Flex` allowance is 2 OCPU / 12 GB RAM (halved in June 2026;
+signup needs a card for identity but Always Free shapes aren't billed). Install Docker,
+clone, `docker compose up -d --build` (includes Postgres and an uploads volume), put
+[Caddy](https://caddyserver.com/) in front for free HTTPS on a free hostname (e.g. DuckDNS)
+— Sky View's camera/compass only works over HTTPS. Set `HWL_ATC_TRANSCRIBE_MODEL=small.en`;
+`medium.en` is too slow on two ARM cores for live captions. "Out of host capacity" errors
+when creating the instance are common — retry or try another availability domain.
+
+**Not free any more:** Fly.io (`fly.toml` still works, but there is no free tier for new
+organisations — 7-day trial only), Railway ($1/month credit after the trial), Koyeb (same
+shape as Render free, weaker Postgres).
+
+**Fly.io / paid Render** (`fly.toml`, `render.yaml` as shipped):
 ```bash
 fly launch --no-deploy
 fly volumes create hwl_data --size 1
@@ -299,17 +396,19 @@ fly deploy
 **Postgres URLs** from Neon/Supabase/Render (`postgres://…` or `…?sslmode=require`) are
 normalized to the async driver automatically — just set `HWL_DATABASE_URL`.
 
-> WebSockets + the always-on background poller mean a long-running server (Render/Fly/
-> Railway) is the right host. Vercel is suitable only for the static frontend pointing at a
-> separately-hosted backend; the single-service approach above is simpler.
-
 ### Configuration (env vars)
 
-See [`backend/.env.example`](backend/.env.example). Key ones: `HWL_POLL_INTERVAL_SECONDS`,
-`HWL_SEARCH_RADIUS_NM`, `HWL_ADSB_SOURCES`, `HWL_ALERT_RADIUS_NM`, `HWL_DATABASE_URL`,
-`HWL_UPLOADS_DIR`, `HWL_CORS_ORIGINS`, `HWL_USER_AGENT`, and for the continental sweep
-`HWL_WIDE_ENABLED`, `HWL_WIDE_SOURCES`, `HWL_WIDE_TILE_INTERVAL_SECONDS`, and for captions
-`HWL_ATC_TRANSCRIBE_ENABLED`, `HWL_ATC_TRANSCRIBE_MODEL`.
+All settings are `HWL_*` environment variables (or `backend/.env`); every one has a
+working default. See [`backend/.env.example`](backend/.env.example) for the full list.
+
+| Area | Variables |
+|---|---|
+| Polling | `HWL_POLL_INTERVAL_SECONDS` (7), `HWL_SEARCH_RADIUS_NM` (250), `HWL_ADSB_SOURCES` (`adsblol,adsbfi,airplaneslive`), `HWL_USER_AGENT` (**set a real contact**) |
+| North America sweep | `HWL_WIDE_ENABLED`, `HWL_WIDE_SOURCES`, `HWL_WIDE_TILE_INTERVAL_SECONDS` (1.5), `HWL_WIDE_MAX_AGE_SECONDS`, `HWL_WIDE_MAX_AIRCRAFT` |
+| ATC captions | `HWL_ATC_TRANSCRIBE_ENABLED`, `HWL_ATC_TRANSCRIBE_MODEL` (`medium.en`), `_DEVICE` (`cpu`/`cuda`), `_COMPUTE` (`int8`), `_THREADS`, `_PRELOAD`, `HWL_ATC_MAX_SESSIONS` (6), `HWL_ATC_IDLE_STOP_SECONDS` (20) |
+| Alerts | `HWL_ALERT_RADIUS_NM` (60), `HWL_INBOUND_MAX_ALTITUDE_FT`, `HWL_INBOUND_DESCENT_RATE_FPM` |
+| Enrichment | `HWL_ROUTE_LOOKUP_ENABLED`, `HWL_ROUTE_CACHE_TTL_SECONDS`, `HWL_PHOTO_CACHE_TTL_SECONDS`, `HWL_OPENSKY_USERNAME/PASSWORD` |
+| Storage / web | `HWL_DATABASE_URL`, `HWL_UPLOADS_DIR`, `HWL_CORS_ORIGINS`, `PORT` |
 
 ---
 
@@ -373,6 +472,16 @@ source guidance) and set a descriptive `HWL_USER_AGENT`.
   ADS-B), not image recognition. Phone compasses are typically ±10–15°; drag to fine-tune
   alignment. Camera and sensors require HTTPS (or localhost).
 - Browser notifications require permission and an open tab.
+- **Motion between fixes is dead-reckoning**, not extra data: icons coast on the last
+  speed/heading for up to ~22 s and blend onto the next fix, so a turning aircraft is
+  shown a little behind the turn. Fixes older than ~50 s stop coasting.
+- **3D / Cockpit** is a pitched map camera (MapLibre 4 has no free camera), so the view is
+  from a little above and behind the aircraft rather than a true out-the-window shot, and
+  the aircraft's own icon is hidden while you ride it. Terrain is 1-arc-second SRTM
+  (~30 m) and buildings are OSM footprints with height tags where available — downtown
+  looks right, suburbs are mostly flat boxes. Cockpit picks only aircraft within the LAX
+  radius that are arriving, departing or rolling; a cruise aircraft can still be ridden
+  from its detail panel.
 - The **North America layer** is a slow sweep (~2 min per pass), so positions outside the
   LAX radius can be up to a couple of minutes old — icons fade with age and the detail
   panel shows the fix age. Country/state uses 1:110m boundaries, so right on a border or
@@ -384,6 +493,12 @@ source guidance) and set a descriptive `HWL_USER_AGENT`.
 - **Live captions** are machine speech-to-text (Whisper) of a noisy, compressed scanner
   feed — not an official transcript. Callsigns, runway numbers and readbacks are often
   wrong or dropped; dimmed lines are low-confidence. The first start downloads the model
-  (~1.5 GB); later starts take about a second. Captioning a feed costs one extra LiveATC
-  listener connection (the browser cannot tap the decoded audio because LiveATC has no
-  CORS). Set `HWL_ATC_TRANSCRIBE_ENABLED=false` to turn them off.
+  (~1.5 GB); later starts take about a second. Captioning runs on the **server's CPU**
+  (`medium.en` int8 ≈ 0.35× realtime on an M-series Mac; see the hosting table above) and
+  each captioned feed costs one extra LiveATC listener connection (the browser cannot tap
+  the decoded audio because LiveATC has no CORS). Up to `HWL_ATC_MAX_SESSIONS` feeds are
+  captioned at once; a session stops ~20 s after its last listener leaves. Set
+  `HWL_ATC_TRANSCRIBE_ENABLED=false` to turn captions off.
+- **Data sources come and go.** adsb.lol has been returning `400`/`429` for radius
+  queries lately; the poller logs a warning and falls through to adsb.fi within the same
+  tick, so the picture keeps updating. airplanes.live needs an emailed access request.
